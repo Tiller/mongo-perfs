@@ -32,7 +32,7 @@ import reactor.core.scheduler.Schedulers;
 import reactor.util.function.Tuple4;
 import reactor.util.function.Tuples;
 
-public class MongoReactivePerfTest {
+public class MongoPerfTest {
 
     private static final int NB_COLL = 200;
     private static final int NB_UPDATE = 300_000;
@@ -40,7 +40,8 @@ public class MongoReactivePerfTest {
 
     private static Scheduler scheduler;
     private static ExecutorService executor;
-    private static MongoClient mongoClient;
+    private static com.mongodb.client.MongoClient mongoClient;
+    private static MongoClient mongoReactiveClient;
     private static SimpleReactiveMongoDatabaseFactory mongoFactory;
     private static ReactiveMongoTemplate mongoTpl;
 
@@ -49,8 +50,9 @@ public class MongoReactivePerfTest {
 
     @BeforeAll
     public static void initMongo() {
-        mongoClient = MongoClients.create();
-        mongoFactory = new SimpleReactiveMongoDatabaseFactory(mongoClient, "test-mongo");
+        mongoClient = com.mongodb.client.MongoClients.create("mongodb://localhost");
+        mongoReactiveClient = MongoClients.create();
+        mongoFactory = new SimpleReactiveMongoDatabaseFactory(mongoReactiveClient, "test-mongo");
         mongoTpl = new ReactiveMongoTemplate(mongoFactory);
         scheduler = Schedulers.newParallel("mongo-scheduler", NB_THREAD);
         executor = Executors.newFixedThreadPool(NB_THREAD);
@@ -62,6 +64,30 @@ public class MongoReactivePerfTest {
     public void init() {
         updates = Flux.range(0, NB_UPDATE).map(i -> Tuples.of("Test_" + (i % NB_COLL), "doc-" + i, Math.random(), (int) (System.currentTimeMillis() / 1000))).collectList().block();
         groupId = new ObjectId().toString();
+    }
+
+    @RepeatedTest(5)
+    public void testRaw() throws InterruptedException, ExecutionException {
+        CompletableFuture<Boolean> future = CompletableFuture.completedFuture(true);
+
+        for (final Tuple4<String, String, Double, Integer> update : updates) {
+
+            future = future
+                    .thenCombine(CompletableFuture
+                            .runAsync(() -> mongoClient
+                                    .getDatabase("test-mongo")
+                                    .getCollection(update.getT1())
+                                    .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                                            .append("fieldA", groupId)
+                                            .append("fieldB", groupId)
+                                            .append("fieldC", update.getT4())
+                                            .append("fieldD.0", update.getT3())
+                                            .append("fieldE.0", update.getT4()))),
+                                    executor),
+                            (a, b) -> true);
+        }
+
+        future.get();
     }
 
     private Mono<UpdateResult> reactiveUpdate(final Tuple4<String, String, Double, Integer> t) {
@@ -146,7 +172,7 @@ public class MongoReactivePerfTest {
             final CompletableFuture<Boolean> future = new CompletableFuture<>();
 
             executor
-                    .execute(() -> mongoClient
+                    .execute(() -> mongoReactiveClient
                             .getDatabase("test-mongo")
                             .getCollection(update.getT1())
                             .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()

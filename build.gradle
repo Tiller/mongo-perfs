@@ -1,0 +1,24 @@
+
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile "io.projectreactor:reactor-core:3.4.8"
+    compile 'org.mongodb:mongodb-driver-core:4.2.3'
+    compile 'org.mongodb:mongodb-driver-sync:4.2.3'
+    compile 'org.mongodb:mongodb-driver-reactivestreams:4.2.3'
+    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb-reactive:2.5.3'
+    
+    testCompile 'io.projectreactor:reactor-test:3.4.8'
+    testCompile 'org.junit.jupiter:junit-jupiter-api:5.7.2'
+    testCompile 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
+}
+
+test {
+    useJUnitPlatform()
+}
