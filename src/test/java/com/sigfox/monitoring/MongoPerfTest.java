@@ -8,12 +8,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
+import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
@@ -25,8 +27,10 @@ import com.mongodb.client.result.UpdateResult;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoClients;
 
+import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.util.function.Tuple4;
@@ -35,7 +39,7 @@ import reactor.util.function.Tuples;
 public class MongoPerfTest {
 
     private static final int NB_COLL = 200;
-    private static final int NB_UPDATE = 300_000;
+    private static final int NB_UPDATE = 100_000;
     private static final int NB_THREAD = 12;
 
     private static Scheduler scheduler;
@@ -66,7 +70,7 @@ public class MongoPerfTest {
         groupId = new ObjectId().toString();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testRaw() throws InterruptedException, ExecutionException {
         CompletableFuture<Boolean> future = CompletableFuture.completedFuture(true);
 
@@ -111,7 +115,7 @@ public class MongoPerfTest {
                 .blockLast();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testFlatMapWithConcurrency() {
         Flux
                 .fromIterable(updates)
@@ -121,7 +125,37 @@ public class MongoPerfTest {
                 .blockLast();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
+    public void testFlatMapWithConcurrencyAndCustomSubscriber() throws InterruptedException, ExecutionException {
+        final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+        Flux
+                .fromIterable(updates)
+                .publishOn(scheduler)
+                .flatMap(this::reactiveUpdate, NB_THREAD, 1)
+                .subscribeOn(scheduler)
+                .subscribe(new BaseSubscriber<>() {
+
+                    private Subscription subscription;
+
+                    protected void hookOnSubscribe(final Subscription subscription) {
+                        this.subscription = subscription;
+                        this.subscription.request(NB_THREAD);
+                    }
+
+                    protected void hookOnNext(final UpdateResult value) {
+                        subscription.request(1l);
+                    }
+
+                    protected void hookFinally(SignalType type) {
+                        future.complete(true);
+                    }
+                });
+
+        future.get();
+    }
+
+    @RepeatedTest(10)
     public void testFlatMapWithConcurrencyAndPrefetch() {
         Flux
                 .fromIterable(updates)
@@ -131,7 +165,7 @@ public class MongoPerfTest {
                 .blockLast();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testFlatMapWithBigConcurrency() {
         Flux
                 .fromIterable(updates)
@@ -141,7 +175,7 @@ public class MongoPerfTest {
                 .blockLast();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testParallel() {
         Flux
                 .fromIterable(updates)
@@ -153,7 +187,7 @@ public class MongoPerfTest {
                 .blockLast();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testBlockExecutor() throws InterruptedException, ExecutionException {
         CompletableFuture<Boolean> future = CompletableFuture.completedFuture(true);
 
@@ -164,7 +198,7 @@ public class MongoPerfTest {
         future.get();
     }
 
-    @RepeatedTest(5)
+    @RepeatedTest(10)
     public void testReactiveRaw() throws InterruptedException, ExecutionException {
         CompletableFuture<Boolean> allFuture = CompletableFuture.completedFuture(true);
 
@@ -206,5 +240,226 @@ public class MongoPerfTest {
         }
 
         allFuture.get();
+    }
+
+    @RepeatedTest(10)
+    public void testReactiveRaw2() throws InterruptedException, ExecutionException {
+        CompletableFuture<Boolean> allFuture = CompletableFuture.completedFuture(true);
+
+        for (final Tuple4<String, String, Double, Integer> update : updates) {
+            allFuture = allFuture.thenCombine(CompletableFuture.runAsync(() -> {
+                final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+                mongoReactiveClient
+                        .getDatabase("test-mongo")
+                        .getCollection(update.getT1())
+                        .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                                .append("fieldA", groupId)
+                                .append("fieldB", groupId)
+                                .append("fieldC", update.getT4())
+                                .append("fieldD.0", update.getT3())
+                                .append("fieldE.0", update.getT4())))
+                        .subscribe(new Subscriber<UpdateResult>() {
+
+                            @Override
+                            public void onSubscribe(Subscription s) {
+                                s.request(1l);
+                            }
+
+                            @Override
+                            public void onNext(UpdateResult t) {}
+
+                            @Override
+                            public void onError(Throwable t) {
+                                t.printStackTrace();
+                            }
+
+                            @Override
+                            public void onComplete() {
+                                future.complete(true);
+                            }
+                        });
+
+                try {
+                    future.get();
+                } catch (final InterruptedException | ExecutionException e) {
+                    e.printStackTrace();
+                }
+            }, executor), (a, b) -> true);
+
+        }
+
+        allFuture.get();
+    }
+
+    @RepeatedTest(10)
+    public void testReactiveRaw3() throws InterruptedException, ExecutionException {
+        CompletableFuture<Boolean> allFuture = CompletableFuture.completedFuture(true);
+
+        for (final Tuple4<String, String, Double, Integer> update : updates) {
+            final Publisher<UpdateResult> op = mongoReactiveClient
+                    .getDatabase("test-mongo")
+                    .getCollection(update.getT1())
+                    .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                            .append("fieldA", groupId)
+                            .append("fieldB", groupId)
+                            .append("fieldC", update.getT4())
+                            .append("fieldD.0", update.getT3())
+                            .append("fieldE.0", update.getT4())));
+
+            allFuture = allFuture.thenCombine(CompletableFuture.runAsync(() -> {
+                final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+                op
+                        .subscribe(new Subscriber<UpdateResult>() {
+
+                            @Override
+                            public void onSubscribe(Subscription s) {
+                                s.request(1l);
+                            }
+
+                            @Override
+                            public void onNext(UpdateResult t) {}
+
+                            @Override
+                            public void onError(Throwable t) {
+                                t.printStackTrace();
+                            }
+
+                            @Override
+                            public void onComplete() {
+                                future.complete(true);
+                            }
+                        });
+
+                try {
+                    future.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    e.printStackTrace();
+                }
+            }, executor), (a, b) -> true);
+        }
+
+        allFuture.get();
+    }
+
+    @RepeatedTest(10)
+    public void testReactiveRaw4() throws InterruptedException, ExecutionException {
+        CompletableFuture<Boolean> allFuture = CompletableFuture.completedFuture(true);
+        Semaphore lock = new Semaphore(NB_THREAD);
+
+        for (final Tuple4<String, String, Double, Integer> update : updates) {
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+            mongoReactiveClient
+                    .getDatabase("test-mongo")
+                    .getCollection(update.getT1())
+                    .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                            .append("fieldA", groupId)
+                            .append("fieldB", groupId)
+                            .append("fieldC", update.getT4())
+                            .append("fieldD.0", update.getT3())
+                            .append("fieldE.0", update.getT4())))
+                    .subscribe(new Subscriber<UpdateResult>() {
+
+                        @Override
+                        public void onSubscribe(Subscription s) {
+                            try {
+                                lock.acquire();
+                                s.request(1l);
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            } finally {
+                                lock.release();
+                            }
+                        }
+
+                        @Override
+                        public void onNext(UpdateResult t) {}
+
+                        @Override
+                        public void onError(Throwable t) {
+                            t.printStackTrace();
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            future.complete(true);
+                        }
+                    });
+        }
+
+        allFuture.get();
+    }
+
+    @RepeatedTest(10)
+    public void testReactiveRaw5() throws InterruptedException, ExecutionException {
+        CompletableFuture<Boolean> allFuture = CompletableFuture.completedFuture(true);
+        Semaphore lock = new Semaphore(NB_THREAD);
+
+        for (final Tuple4<String, String, Double, Integer> update : updates) {
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+            mongoReactiveClient
+                    .getDatabase("test-mongo")
+                    .getCollection(update.getT1())
+                    .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                            .append("fieldA", groupId)
+                            .append("fieldB", groupId)
+                            .append("fieldC", update.getT4())
+                            .append("fieldD.0", update.getT3())
+                            .append("fieldE.0", update.getT4())))
+                    .subscribe(new Subscriber<UpdateResult>() {
+
+                        @Override
+                        public void onSubscribe(Subscription s) {
+                            executor.execute(() -> {
+                                try {
+                                    lock.acquire();
+                                    s.request(1l);
+                                } catch (InterruptedException e) {
+                                    e.printStackTrace();
+                                } finally {
+                                    lock.release();
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onNext(UpdateResult t) {}
+
+                        @Override
+                        public void onError(Throwable t) {
+                            t.printStackTrace();
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            future.complete(true);
+                        }
+                    });
+        }
+
+        allFuture.get();
+    }
+
+    @RepeatedTest(10)
+    public void testRawWrappedWithConcurrency() throws InterruptedException, ExecutionException {
+        Flux
+                .fromIterable(updates)
+                .flatMap(update -> Mono
+                        .fromCallable(() -> mongoClient
+                                .getDatabase("test-mongo")
+                                .getCollection(update.getT1())
+                                .updateOne(new BasicDBObject("_id", update.getT2()), new BasicDBObject("$set", new BasicDBObject()
+                                        .append("fieldA", groupId)
+                                        .append("fieldB", groupId)
+                                        .append("fieldC", update.getT4())
+                                        .append("fieldD.0", update.getT3())
+                                        .append("fieldE.0", update.getT4()))))
+                        .subscribeOn(Schedulers.boundedElastic()), NB_THREAD, 1)
+                .publishOn(scheduler)
+                .subscribeOn(scheduler)
+                .blockLast();
     }
 }
