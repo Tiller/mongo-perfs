@@ -369,8 +369,6 @@ public class MongoPerfTest {
                                 s.request(1l);
                             } catch (InterruptedException e) {
                                 e.printStackTrace();
-                            } finally {
-                                lock.release();
                             }
                         }
 
@@ -385,6 +383,7 @@ public class MongoPerfTest {
                         @Override
                         public void onComplete() {
                             future.complete(true);
+                            lock.release();
                         }
                     });
         }
@@ -419,8 +418,6 @@ public class MongoPerfTest {
                                     s.request(1l);
                                 } catch (InterruptedException e) {
                                     e.printStackTrace();
-                                } finally {
-                                    lock.release();
                                 }
                             });
                         }
@@ -436,6 +433,7 @@ public class MongoPerfTest {
                         @Override
                         public void onComplete() {
                             future.complete(true);
+                            lock.release();
                         }
                     });
         }
